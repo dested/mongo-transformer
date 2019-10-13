@@ -1,4 +1,3 @@
-import {LogicalExpression} from 'estree';
 import * as ts from 'typescript';
 import {
   ArrowFunction,
@@ -13,17 +12,45 @@ import {
 } from 'typescript';
 
 function parseArrow(arrow: ArrowFunction, sourceFile: ts.SourceFile) {
-  const result = new Shoes(sourceFile).start(arrow);
+  const result = new ParseFile(sourceFile).start(arrow);
+
+  const literal = objectToAssignments(result);
+
+  return literal;
+}
+
+function objectToAssignments(result: any) {
   const assignments: ts.PropertyAssignment[] = [];
   for (const resultKey in result) {
-    console.log(resultKey, result[resultKey]);
-    assignments.push(ts.createPropertyAssignment(resultKey, ts.createStringLiteral(result[resultKey])));
-  }
+    if (!result.hasOwnProperty(resultKey)) {
+      continue;
+    }
+    const rightResult = result[resultKey];
+    let right: any;
+    switch (rightResult.variable) {
+      case 'local':
+      case 'params':
+        right = ts.createIdentifier(rightResult.expression);
+        break;
+      default:
+        if (rightResult.expression) {
+          right = ts.createLiteral(rightResult.expression);
+        } else {
+          right = objectToAssignments(rightResult);
+        }
+        break;
+    }
 
+    if (resultKey.indexOf('.') >= 0) {
+      assignments.push(ts.createPropertyAssignment(ts.createStringLiteral(resultKey), right));
+    } else {
+      assignments.push(ts.createPropertyAssignment(resultKey, right));
+    }
+  }
   return ts.createObjectLiteral(assignments);
 }
 
-export class Shoes {
+export class ParseFile {
   constructor(private sourceFile: ts.SourceFile) {}
   parseBody(body: Expression, variableNames: string[]) {
     if (ts.isBinaryExpression(body)) {
@@ -38,8 +65,7 @@ export class Shoes {
     } else if (ts.isPrefixUnaryExpression(body)) {
       return this.parseUnaryExpression(body, variableNames);
     } else if (ts.isCallLikeExpression(body)) {
-      console.log('ERROR THING IDK');
-      console.log(body);
+      return this.parseSide(body, variableNames);
       /*
       return this.parseUnaryExpression(
         {
@@ -51,7 +77,6 @@ export class Shoes {
         variableNames
       );
 */
-      return {};
     } else {
       throw new Error('Expression must be Binary or Logical: ' + body.getText(this.sourceFile));
     }
@@ -77,7 +102,7 @@ export class Shoes {
     const rightSide = this.parseSide(body.right, variableNames);
 
     const left = leftSide.expression;
-    const right = rightSide.expression;
+    const right = rightSide;
     let result: any;
 
     switch (body.operatorToken.kind) {
@@ -128,7 +153,7 @@ export class Shoes {
     if (side.shouldBeUnary === false) {
       throw Error('Expression was supposed to be Unary');
     }
-    return side.expression;
+    return side;
   }
 
   parseSide(
@@ -136,11 +161,10 @@ export class Shoes {
     variableNames: string[]
   ): {
     expression: any;
-    variable?: 'params' | 'local';
+    variable?: 'params' | 'local' | 'string' | 'number' | 'boolean';
     expressionName?: string;
     shouldBeUnary: boolean;
   } {
-    debugger;
     if (ts.isIdentifier(side) || ts.isPropertyAccessExpression(side)) {
       const name = this.flattenObject(side, variableNames);
       const nameWithoutInitial = name
@@ -162,11 +186,35 @@ export class Shoes {
         variable: 'params',
       };
     } else if (ts.isLiteralExpression(side)) {
-      return {
-        expression: side.getText(),
-        shouldBeUnary: false,
-        variable: null,
-      };
+      if (ts.isStringLiteral(side)) {
+        return {
+          expression: side.text,
+          shouldBeUnary: false,
+          variable: null,
+        };
+      }
+      if (ts.isNumericLiteral(side)) {
+        return {
+          expression: parseFloat(side.text),
+          shouldBeUnary: false,
+          variable: null,
+        };
+      }
+      if (side.text === 'false') {
+        return {
+          expression: false,
+          shouldBeUnary: false,
+          variable: null,
+        };
+      }
+      if (side.text === 'true') {
+        return {
+          expression: true,
+          shouldBeUnary: false,
+          variable: null,
+        };
+      }
+      throw new Error('BAD TEXT ' + side.text);
     } else if (ts.isCallLikeExpression(side)) {
       const callExpression = side as ts.CallExpression;
       const callee = this.parseSide(callExpression.expression, variableNames);
@@ -193,6 +241,7 @@ export class Shoes {
 
           switch (callee.variable) {
             case 'local':
+              console.log(queryResult);
               return {
                 expression: {[propertyName]: {$elemMatch: queryResult}},
                 shouldBeUnary: true,
@@ -222,11 +271,43 @@ export class Shoes {
 
     switch (side.kind) {
       case SyntaxKind.NumericLiteral:
+        return {
+          expression: parseFloat(side.getText()),
+          shouldBeUnary: false,
+          variable: null,
+        };
+
       case SyntaxKind.StringLiteral:
-      case SyntaxKind.BooleanKeyword:
-      case SyntaxKind.NullKeyword:
         return {
           expression: side.getText(),
+          shouldBeUnary: false,
+          variable: null,
+        };
+
+      case SyntaxKind.TrueKeyword:
+        return {
+          expression: true,
+          shouldBeUnary: false,
+          variable: null,
+        };
+
+      case SyntaxKind.FalseKeyword:
+        return {
+          expression: false,
+          shouldBeUnary: false,
+          variable: null,
+        };
+
+      case SyntaxKind.UndefinedKeyword:
+        return {
+          expression: undefined,
+          shouldBeUnary: false,
+          variable: null,
+        };
+
+      case SyntaxKind.NullKeyword:
+        return {
+          expression: null,
           shouldBeUnary: false,
           variable: null,
         };
@@ -244,22 +325,8 @@ export class Shoes {
   };*/
 
     throw new Error(
-      `Side must either be an Identifier, Member Expression, or Literal: ${side.getText(this.sourceFile)}`
+      `Side must either be an Identifier, Member Expression, or Literal: ${side.kind} ${side.getText(this.sourceFile)}`
     );
-  }
-
-  parseDocumentUtilsValue(value: string): any {
-    switch (value) {
-      case 'empty':
-        return null;
-      case 'false':
-        return false;
-      case 'true':
-        return true;
-      case 'zero':
-        return 0;
-    }
-    throw new Error('DocumentUtils value not defined: ' + value);
   }
 
   flattenObject(member: LeftHandSideExpression | PrefixUnaryExpression, variableNames: string[]): string {
